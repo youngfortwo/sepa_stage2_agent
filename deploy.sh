@@ -62,6 +62,10 @@ if [ "$UNINSTALL" -eq 1 ]; then
     PLIST="$HOME/Library/LaunchAgents/com.stock.sepa-stage2.plist"
     launchctl unload "$PLIST" >/dev/null 2>&1 || true
     rm -f "$PLIST"
+    QPLIST="$HOME/Library/LaunchAgents/com.stock.sepa-stage2-query.plist"
+    launchctl unload "$QPLIST" >/dev/null 2>&1 || true
+    rm -f "$QPLIST"
+    ok "已移除 launchd 定时任务与查询服务"
     # 撤销定时唤醒（仅当设置了 pmset 且有 sudo 权限时）
     if sudo -n pmset -g repeat >/dev/null 2>&1; then
       sudo -n pmset repeat cancel >/dev/null 2>&1 || true
@@ -123,6 +127,7 @@ cfg.setdefault("boot_run", True)          # 开机立即执行（当天未执行
 cfg.setdefault("boot_force", False)       # 开机强制执行（忽略当天已执行标记）
 cfg.setdefault("check_trading_day", True) # false = 周末节假日也执行
 cfg.setdefault("enabled", True)           # 总开关（false = 任何触发都直接退出）
+cfg.setdefault("query_port", 8010)        # 查询服务端口（主机从本机拉数据用）
 p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 print("[ok] agent_config.json:", json.dumps(cfg, ensure_ascii=False))
 PYEOF
@@ -187,9 +192,45 @@ EOF
     echo "    sudo pmset repeat wakeorpoweron MTWRFSU ${WAKE_STR}"
   fi
   info "日志: tail -f /tmp/sepa_stage2_job.log"
+
+  # ── 查询服务（常驻）：主机可随时从本机拉取 SQLite 数据 ──
+  QPLIST="$HOME/Library/LaunchAgents/com.stock.sepa-stage2-query.plist"
+  cat > "$QPLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.stock.sepa-stage2-query</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$(command -v "$PY")</string>
+        <string>${AGENT_DIR}/sepa_query_server.py</string>
+    </array>
+    <key>WorkingDirectory</key><string>${AGENT_DIR}</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>EnvironmentVariables</key>
+    <dict><key>NO_PROXY</key><string>*</string><key>no_proxy</key><string>*</string></dict>
+    <key>StandardOutPath</key><string>/tmp/sepa_query_server.log</string>
+    <key>StandardErrorPath</key><string>/tmp/sepa_query_server.err</string>
+</dict>
+</plist>
+EOF
+  launchctl unload "$QPLIST" >/dev/null 2>&1 || true
+  launchctl load "$QPLIST"
+  sleep 1
+  QUERY_PORT="$("$PY" -c "import json; print(json.load(open('agent_config.json')).get('query_port', 8010))" 2>/dev/null || echo 8010)"
+  if curl -fs -m 3 "http://127.0.0.1:${QUERY_PORT}/ping" >/dev/null 2>&1; then
+    ok "查询服务已常驻: http://$(ipconfig getifaddr en0 2>/dev/null || echo 本机IP):${QUERY_PORT}（主机可拉取本机数据）"
+  else
+    warn "查询服务已注册但未响应（端口 ${QUERY_PORT}），查看: tail -f /tmp/sepa_query_server.err"
+  fi
 else
   warn "Linux 用户请自行添加 crontab（每 5 分钟唤起，执行时机由 agent_config.json 控制）："
   echo "    (crontab -l 2>/dev/null | grep -v sepa_stage2_job; echo '*/5 * * * * cd ${AGENT_DIR} && ${PY} sepa_stage2_job.py >> /tmp/sepa_stage2_job.log 2>&1') | crontab -"
+  # 查询服务：nohup 常驻（如需开机自启建议注册 systemd user service）
+  pgrep -f sepa_query_server.py >/dev/null 2>&1 || nohup "$PY" sepa_query_server.py >> /tmp/sepa_query_server.log 2>&1 &
+  ok "查询服务已启动: http://本机IP:8010"
 fi
 
 # ── 部署完成立即正式执行一次（--boot-force：正式跑并写当天标记；enabled=false 时跳过） ──
