@@ -58,6 +58,22 @@ def _mark_ran_today() -> None:
         pass
 
 
+def _is_scheduled_trigger(cfg: dict) -> bool:
+    """当前时刻是否在定时窗口（run_time ±10 分钟）内——用于区分定时触发与开机触发。
+
+    launchd 的 RunAtLoad（开机）和 StartCalendarInterval（定时）共用同一命令行，
+    只能靠时间窗口区分：距配置的执行时间 10 分钟内视为定时触发。
+    """
+    run_time = str(cfg.get("run_time", "18:00"))
+    try:
+        h, m = map(int, run_time.split(":"))
+    except ValueError:
+        return True  # 配置异常时保守视为定时触发（维持去重）
+    now = dt.datetime.now()
+    scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    return abs((now - scheduled).total_seconds()) <= 600
+
+
 def is_trading_day(day: dt.date) -> bool:
     """周一~周五 + 新浪交易日历（best-effort，日历失败时仅按周末判断）。"""
     if day.weekday() >= 5:
@@ -239,10 +255,16 @@ def main() -> int:
 
     today = dt.date.today()
     # 当天已成功执行过则跳过（启动即执行 + 18:00 定时的去重保证，--force 可强制重跑）
+    boot_force_on = False
     if not args.force and _ran_today():
-        print(f"[job] {today} 已执行过，跳过（--force 可强制重跑）")
-        return 0
-    if not args.force and not is_trading_day(today):
+        cfg = _load_agent_config()
+        # 开机触发且 boot_force=true：忽略"当天已执行"强制重跑；18:00 定时触发始终去重
+        if _is_scheduled_trigger(cfg) or not cfg.get("boot_force", False):
+            print(f"[job] {today} 已执行过，跳过（--force 可强制重跑）")
+            return 0
+        boot_force_on = True
+        print("[job] 开机强制模式（boot_force=true），忽略当天已执行标记")
+    if not args.force and not boot_force_on and not is_trading_day(today):
         print(f"[job] {today} 非交易日，跳过（--force 可强制运行）")
         return 0
 

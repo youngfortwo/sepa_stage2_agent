@@ -7,6 +7,9 @@
 # 【自定义执行时间】默认每交易日 18:00，可用 --time 修改：
 #   ./deploy.sh http://192.168.1.100:8001 --time 17:30
 #
+# 【开机强制】加 --boot-force 后，每次开机启动都重新扫描（忽略当天已执行标记）：
+#   ./deploy.sh --boot-force
+#
 # 【卸载】移除定时任务与定时唤醒：
 #   ./deploy.sh --uninstall
 #
@@ -24,12 +27,13 @@ ok()    { printf "\033[1;32m[ok]\033[0m %s\n" "$*"; }
 warn()  { printf "\033[1;33m[warn]\033[0m %s\n" "$*" >&2; }
 
 # ── 参数解析 ──
-SERVER="http://192.168.31.70:8001"; RUN_TIME="18:00"; UNINSTALL=0
+SERVER="http://192.168.31.70:8001"; RUN_TIME="18:00"; UNINSTALL=0; BOOT_FORCE="false"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --server)    SERVER="$2"; shift 2 ;;
-    --time)      RUN_TIME="$2"; shift 2 ;;
-    --uninstall) UNINSTALL=1; shift ;;
+    --server)      SERVER="$2"; shift 2 ;;
+    --time)        RUN_TIME="$2"; shift 2 ;;
+    --boot-force)  BOOT_FORCE="true"; shift ;;
+    --uninstall)   UNINSTALL=1; shift ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,2\}//' | head -16; exit 0 ;;
     *)
@@ -100,10 +104,15 @@ fi
 cat > agent_config.json <<EOF
 {
   "server": "${SERVER}",
-  "db": "sepa_stage2.db"
+  "db": "sepa_stage2.db",
+  "run_time": "${HOUR}:${MINUTE}",
+  "boot_force": ${BOOT_FORCE}
 }
 EOF
-ok "配置写入 agent_config.json → $SERVER"
+ok "配置写入 agent_config.json → server=${SERVER}, run_time=${HOUR}:${MINUTE}, boot_force=${BOOT_FORCE}"
+if [ "$BOOT_FORCE" = "true" ]; then
+  ok "开机强制模式：每次开机启动都重新扫描（忽略当天已执行标记）"
+fi
 
 # ── 连通性测试 ──
 if "$PY" - <<PYEOF
@@ -173,6 +182,10 @@ fi
 
 echo ""
 ok "部署完成！部署后立即开始首次扫描，此后每交易日 ${HOUR}:${MINUTE} 自动执行。"
-ok "当天已执行过会自动跳过（--force 强制重跑），重启开机也会补跑当天任务。"
+if [ "$BOOT_FORCE" = "true" ]; then
+  ok "开机强制模式已开启：每次开机启动都重新扫描（不跳过当天已执行）。"
+else
+  ok "当天已执行过会自动跳过（--force 强制重跑 / 部署时加 --boot-force 开启开机强制）。"
+fi
 info "小批量试跑验证全链路（前 100 只）:"
 echo "    ./run_once.sh --total 100"
