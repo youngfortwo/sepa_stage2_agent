@@ -39,6 +39,23 @@ UPLOAD_RETRIES = 3           # 上报失败重试次数
 UPLOAD_RETRY_WAIT = 10       # 重试间隔（秒）
 CALENDAR_CACHE = Path(__file__).parent / "trade_calendar_cache.json"
 CALENDAR_TTL_DAYS = 90        # 交易日历缓存有效期
+MARKER_FILE = Path(__file__).parent / "last_run_marker.txt"   # 当天已执行标记
+
+
+def _ran_today() -> bool:
+    """当天是否已成功执行过（标记文件记录最近一次成功完成的日期）。"""
+    try:
+        return MARKER_FILE.read_text(encoding="utf-8").strip() == str(dt.date.today())
+    except Exception:
+        return False
+
+
+def _mark_ran_today() -> None:
+    """扫描完成并落库后写标记：启动/18点后续触发自动跳过。"""
+    try:
+        MARKER_FILE.write_text(str(dt.date.today()), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def is_trading_day(day: dt.date) -> bool:
@@ -221,6 +238,10 @@ def main() -> int:
         return 0 if ok else 1
 
     today = dt.date.today()
+    # 当天已成功执行过则跳过（启动即执行 + 18:00 定时的去重保证，--force 可强制重跑）
+    if not args.force and _ran_today():
+        print(f"[job] {today} 已执行过，跳过（--force 可强制重跑）")
+        return 0
     if not args.force and not is_trading_day(today):
         print(f"[job] {today} 非交易日，跳过（--force 可强制运行）")
         return 0
@@ -240,6 +261,9 @@ def main() -> int:
     try:
         saved = save_candidates(df, args.db, scan_date)
         print(f"[job] 本地 SQLite 写入 {saved} 行 → {args.db}")
+        # 定时任务成功后标记当天已完成；--force 手动跑不写标记，不影响 18:00 定时
+        if not args.force:
+            _mark_ran_today()
     except Exception:
         traceback.print_exc()
 
@@ -251,6 +275,8 @@ def main() -> int:
     df_out["scanned_at"] = generated_at
     payload = build_payload(df_out, scan_date, generated_at)
     ok = upload(args.server, args.token, payload)
+    if not ok:
+        print(f"[job] 上报失败：数据已存本地 SQLite，网络恢复后补传: ./run_once.sh --reupload {scan_date}", file=sys.stderr)
     return 0 if ok else 1
 
 

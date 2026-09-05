@@ -21,5 +21,9 @@ ARGS=("$@")
 if [ -n "$SERVER" ] && ! printf '%s\n' "${ARGS[@]:-}" 2>/dev/null | grep -q '^--server$'; then
   ARGS=(--server "$SERVER" "${ARGS[@]}")
 fi
+# 手动运行总是执行（跳过"当天已执行/非交易日"检查；--reupload 模式不受影响）
+if ! printf '%s\n' "${ARGS[@]:-}" 2>/dev/null | grep -q '^--force$'; then
+  ARGS=(--force "${ARGS[@]}")
+fi
 
 exec "$PY" sepa_stage2_job.py "${ARGS[@]}"

@@ -24,12 +24,11 @@ ok()    { printf "\033[1;32m[ok]\033[0m %s\n" "$*"; }
 warn()  { printf "\033[1;33m[warn]\033[0m %s\n" "$*" >&2; }
 
 # ── 参数解析 ──
-SERVER=""; RUN_TIME="18:00"; AUTO=1; UNINSTALL=0
+SERVER="http://192.168.31.70:8001"; RUN_TIME="18:00"; UNINSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --server)    SERVER="$2"; shift 2 ;;
     --time)      RUN_TIME="$2"; shift 2 ;;
-    --auto)      AUTO=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,2\}//' | head -16; exit 0 ;;
@@ -75,8 +74,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 if [ -z "$SERVER" ]; then
-  read -r -p "主机 stock_server 地址（如 http://192.168.1.100:8001）: " SERVER
-  SERVER="${SERVER%/}"
+  warn "缺少主机地址（默认 http://192.168.31.70:8001）"; exit 1
 fi
 
 # ── Python 检查 ──
@@ -135,6 +133,7 @@ if [ "$(uname)" = "Darwin" ]; then
         <string>--server</string><string>${SERVER}</string>
     </array>
     <key>WorkingDirectory</key><string>${AGENT_DIR}</string>
+    <key>RunAtLoad</key><true/>
     <key>StartCalendarInterval</key>
     <array>
         $(for d in 1 2 3 4 5; do
@@ -150,7 +149,9 @@ if [ "$(uname)" = "Darwin" ]; then
 EOF
   launchctl unload "$PLIST" >/dev/null 2>&1 || true
   launchctl load "$PLIST"
-  ok "定时任务已注册：周一~周五 ${HOUR}:${MINUTE} 自动启动扫描（launchd）"
+  ok "定时任务已注册（launchd）："
+  ok "  · 每周一~周五 ${HOUR}:${MINUTE} 自动执行"
+  ok "  · 开机/部署完成后立即执行（当天已执行过则自动跳过）"
 
   # ── 定时唤醒：防止睡眠/关机错过触发 ──
   # 唤醒时间 = 执行时间提前 5 分钟
@@ -166,11 +167,12 @@ EOF
   fi
   info "日志: tail -f /tmp/sepa_stage2_job.log"
 else
-  warn "Linux 用户请自行添加 crontab："
-  echo "    (crontab -l 2>/dev/null; echo '${MINUTE} ${HOUR} * * 1-5 cd ${AGENT_DIR} && ${PY} sepa_stage2_job.py --server ${SERVER} >> /tmp/sepa_stage2_job.log 2>&1') | crontab -"
+  warn "Linux 用户请自行添加 crontab（18:00 定时 + 开机执行，脚本内自动去重）："
+  echo "    (crontab -l 2>/dev/null; echo '${MINUTE} ${HOUR} * * 1-5 cd ${AGENT_DIR} && ${PY} sepa_stage2_job.py >> /tmp/sepa_stage2_job.log 2>&1'; echo '@reboot cd ${AGENT_DIR} && ${PY} sepa_stage2_job.py >> /tmp/sepa_stage2_job.log 2>&1') | crontab -"
 fi
 
 echo ""
-ok "部署完成！到点后自动扫描并上报，无需人工干预。"
-info "立即试跑验证全链路（扫描前 100 只）:"
+ok "部署完成！部署后立即开始首次扫描，此后每交易日 ${HOUR}:${MINUTE} 自动执行。"
+ok "当天已执行过会自动跳过（--force 强制重跑），重启开机也会补跑当天任务。"
+info "小批量试跑验证全链路（前 100 只）:"
 echo "    ./run_once.sh --total 100"
