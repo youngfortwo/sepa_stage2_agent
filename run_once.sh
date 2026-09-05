@@ -21,8 +21,12 @@ ARGS=("$@")
 if [ -n "$SERVER" ] && ! printf '%s\n' "${ARGS[@]:-}" 2>/dev/null | grep -q '^--server$'; then
   ARGS=(--server "$SERVER" "${ARGS[@]}")
 fi
-# 手动运行总是执行（跳过"当天已执行/非交易日"检查；--reupload 模式不受影响）
-if ! printf '%s\n' "${ARGS[@]:-}" 2>/dev/null | grep -q '^--force$'; then
+# 手动运行总是执行：未显式传 --force / --boot-force 时自动加 --force 跳过检查
+# （--force 试跑不写标记；--boot-force 正式重跑并更新标记，当天后续不再跑）
+has_force=0
+printf '%s\n' "${ARGS[@]:-}" 2>/dev/null | grep -q '^--force$' && has_force=1
+printf '%s\n' "${ARGS[@]:-}" 2>/dev/null | grep -q '^--boot-force$' && has_force=1
+if [ "$has_force" -eq 0 ]; then
   ARGS=(--force "${ARGS[@]}")
 fi
 
