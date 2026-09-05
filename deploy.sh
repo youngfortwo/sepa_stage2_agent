@@ -4,17 +4,18 @@
 # 【一键部署】一条命令完成所有事（装依赖 → 测连通 → 注册定时任务 → 设置定时唤醒）：
 #   ./deploy.sh http://192.168.1.100:8001
 #
-# 【自定义执行时间】默认每交易日 18:00，可用 --time 修改：
-#   ./deploy.sh http://192.168.1.100:8001 --time 17:30
+# 【执行时机全部由 agent_config.json 控制】launchd 只是"哑触发器"（开机 + 每 5 分钟
+#   唤起一次 job.py），是否执行/几点执行全部由 job.py 读配置决定——改配置立即生效：
+#     run_time / boot_run / boot_force / check_trading_day / enabled
 #
-# 【强制重跑】运行时传 --boot-force，忽略当天已执行标记（每次运行每次输入）：
-#   ./run_once.sh --boot-force
+# 【自定义执行时间】默认 18:00，可用 --time 修改（写入配置的 run_time）：
+#   ./deploy.sh http://192.168.1.100:8001 --time 17:30
 #
 # 【卸载】移除定时任务与定时唤醒：
 #   ./deploy.sh --uninstall
 #
-# 到点后 launchd 自动拉起 sepa_stage2_job.py（无需人工干预、无需登录 GUI），
-# 扫描完成自动上报主机。节假日由脚本内交易日历二次校验，自动跳过。
+# 重新部署不会覆盖用户在 agent_config.json 里的自定义字段（--time 显式传入时才更新
+# run_time）。节假日跳过由 job 内交易日历校验（可用 check_trading_day=false 关闭）。
 
 set -euo pipefail
 
@@ -27,11 +28,11 @@ ok()    { printf "\033[1;32m[ok]\033[0m %s\n" "$*"; }
 warn()  { printf "\033[1;33m[warn]\033[0m %s\n" "$*" >&2; }
 
 # ── 参数解析 ──
-SERVER="http://192.168.31.70:8001"; RUN_TIME="18:00"; UNINSTALL=0
+SERVER="http://192.168.31.70:8001"; RUN_TIME="18:00"; TIME_SET=0; UNINSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --server)    SERVER="$2"; shift 2 ;;
-    --time)      RUN_TIME="$2"; shift 2 ;;
+    --time)      RUN_TIME="$2"; TIME_SET=1; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,2\}//' | head -16; exit 0 ;;
@@ -99,14 +100,32 @@ else
   ok "依赖已就绪"
 fi
 
-# ── 写入配置（改主机地址无需重装定时任务） ──
-cat > agent_config.json <<EOF
-{
-  "server": "${SERVER}",
-  "db": "sepa_stage2.db"
-}
-EOF
-ok "配置写入 agent_config.json → $SERVER"
+# ── 写入配置（执行时机全部由 agent_config.json 控制，改配置即生效，无需重装定时任务；
+#     重新部署时用户已自定义的字段不会被覆盖，--time 显式传入时才更新 run_time） ──
+"$PY" - <<PYEOF
+import json
+from pathlib import Path
+
+p = Path("agent_config.json")
+cfg = {}
+if p.exists():
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+cfg["server"] = "${SERVER}"
+cfg["db"] = "sepa_stage2.db"
+if ${TIME_SET}:
+    cfg["run_time"] = "${HOUR}:${MINUTE}"           # 显式传 --time：更新执行时间
+else:
+    cfg.setdefault("run_time", "${HOUR}:${MINUTE}") # 已有配置不覆盖
+cfg.setdefault("boot_run", True)          # 开机立即执行（当天未执行时）
+cfg.setdefault("boot_force", False)       # 开机强制执行（忽略当天已执行标记）
+cfg.setdefault("check_trading_day", True) # false = 周末节假日也执行
+cfg.setdefault("enabled", True)           # 总开关（false = 任何触发都直接退出）
+p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print("[ok] agent_config.json:", json.dumps(cfg, ensure_ascii=False))
+PYEOF
 
 # ── 连通性测试 ──
 if "$PY" - <<PYEOF
@@ -120,7 +139,8 @@ then ok "主机连通: $SERVER"
 else warn "主机不可达（${SERVER}）。请确认主机 stock_server 已启动、IP 正确、同一局域网"
 fi
 
-# ── 注册定时任务 ──
+# ── 注册定时任务（launchd 只是"哑触发器"：开机唤起 + 每 5 分钟唤起；
+#     执行时间/是否执行等全部由 agent_config.json 控制，改配置即生效） ──
 if [ "$(uname)" = "Darwin" ]; then
   PLIST="$HOME/Library/LaunchAgents/com.stock.sepa-stage2.plist"
   cat > "$PLIST" <<EOF
@@ -133,14 +153,13 @@ if [ "$(uname)" = "Darwin" ]; then
     <array>
         <string>$(command -v "$PY")</string>
         <string>${AGENT_DIR}/sepa_stage2_job.py</string>
-        <string>--server</string><string>${SERVER}</string>
     </array>
     <key>WorkingDirectory</key><string>${AGENT_DIR}</string>
     <key>RunAtLoad</key><true/>
     <key>StartCalendarInterval</key>
     <array>
-        $(for d in 1 2 3 4 5; do
-            echo "<dict><key>Weekday</key><integer>$d</integer><key>Hour</key><integer>${HOUR_N}</integer><key>Minute</key><integer>${MINUTE_N}</integer></dict>"
+        $(for m in 0 5 10 15 20 25 30 35 40 45 50 55; do
+            echo "<dict><key>Minute</key><integer>$m</integer></dict>"
           done | tr '\n' ' ')
     </array>
     <key>EnvironmentVariables</key>
@@ -152,30 +171,37 @@ if [ "$(uname)" = "Darwin" ]; then
 EOF
   launchctl unload "$PLIST" >/dev/null 2>&1 || true
   launchctl load "$PLIST"
-  ok "定时任务已注册（launchd）："
-  ok "  · 每周一~周五 ${HOUR}:${MINUTE} 自动执行"
-  ok "  · 开机/部署完成后立即执行（当天已执行过则自动跳过）"
+  ok "定时任务已注册（launchd 哑触发器：开机 + 每 5 分钟唤起）"
+  ok "  · 执行时间等全部由 agent_config.json 控制（当前 run_time=${HOUR}:${MINUTE}），改配置即生效"
 
   # ── 定时唤醒：防止睡眠/关机错过触发 ──
-  # 唤醒时间 = 执行时间提前 5 分钟
+  # 唤醒时间 = 执行时间提前 5 分钟；每天唤醒（周几执行由 check_trading_day 配置决定）
   WAKE_M=$((10#$MINUTE - 5)); WAKE_H=$((10#$HOUR))
   if [ "$WAKE_M" -lt 0 ]; then WAKE_M=$((WAKE_M + 60)); WAKE_H=$((WAKE_H - 1)); fi
   if [ "$WAKE_H" -lt 0 ]; then WAKE_H=23; fi
   WAKE_STR="$(printf '%02d:%02d' "$WAKE_H" "$WAKE_M")"
-  if sudo -n pmset repeat wakeorpoweron MTWRF "$WAKE_STR" >/dev/null 2>&1; then
-    ok "定时唤醒已设置：周一~周五 ${WAKE_STR}（防睡眠错过）"
+  if sudo -n pmset repeat wakeorpoweron MTWRFSU "$WAKE_STR" >/dev/null 2>&1; then
+    ok "定时唤醒已设置：每天 ${WAKE_STR}（防睡眠错过）"
   else
     info "设置定时唤醒需要管理员密码（防止 Mac 睡眠错过 ${HOUR}:${MINUTE}），请手动执行："
-    echo "    sudo pmset repeat wakeorpoweron MTWRF ${WAKE_STR}"
+    echo "    sudo pmset repeat wakeorpoweron MTWRFSU ${WAKE_STR}"
   fi
   info "日志: tail -f /tmp/sepa_stage2_job.log"
 else
-  warn "Linux 用户请自行添加 crontab（18:00 定时 + 开机执行，脚本内自动去重）："
-  echo "    (crontab -l 2>/dev/null; echo '${MINUTE} ${HOUR} * * 1-5 cd ${AGENT_DIR} && ${PY} sepa_stage2_job.py >> /tmp/sepa_stage2_job.log 2>&1'; echo '@reboot cd ${AGENT_DIR} && ${PY} sepa_stage2_job.py >> /tmp/sepa_stage2_job.log 2>&1') | crontab -"
+  warn "Linux 用户请自行添加 crontab（每 5 分钟唤起，执行时机由 agent_config.json 控制）："
+  echo "    (crontab -l 2>/dev/null | grep -v sepa_stage2_job; echo '*/5 * * * * cd ${AGENT_DIR} && ${PY} sepa_stage2_job.py >> /tmp/sepa_stage2_job.log 2>&1') | crontab -"
+fi
+
+# ── 部署完成立即正式执行一次（--boot-force：正式跑并写当天标记；enabled=false 时跳过） ──
+if "$PY" -c "import json,sys; sys.exit(0 if json.load(open('agent_config.json')).get('enabled', True) else 1)" 2>/dev/null; then
+  info "立即启动首次扫描（后台运行，日志 /tmp/sepa_stage2_job.log）…"
+  nohup "$PY" sepa_stage2_job.py --boot-force >> /tmp/sepa_stage2_job.log 2>&1 &
+else
+  info "enabled=false，跳过首次扫描"
 fi
 
 echo ""
-ok "部署完成！部署后立即开始首次扫描，此后每交易日 ${HOUR}:${MINUTE} 自动执行。"
-ok "当天已执行过会自动跳过；强制重跑用 ./run_once.sh --boot-force（运行时传参）。"
+ok "部署完成！执行时机全部由 agent_config.json 控制（改配置即生效，无需重装）。"
+ok "当前配置：run_time=${HOUR}:${MINUTE}，详见 agent_config.json（run_time/boot_run/boot_force/check_trading_day/enabled）。"
 info "小批量试跑验证全链路（前 100 只）:"
 echo "    ./run_once.sh --total 100"

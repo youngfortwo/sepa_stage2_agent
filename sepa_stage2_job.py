@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """SEPA Stage2 独立定时扫描任务（部署在局域网另一台扫描机上）。
 
+触发模型（launchd 只是"哑触发器"：开机 + 每 5 分钟唤起一次本脚本）：
+所有执行时机均由 agent_config.json 控制，改配置立即生效、无需重装定时任务：
+    run_time           每日执行时间（到点后的第一个轮询触发开始执行）
+    boot_run           开机是否立即执行（当天未执行时）
+    boot_force         开机是否强制执行（忽略当天已执行标记）
+    check_trading_day  是否跳过非交易日（false = 周末节假日也执行）
+    enabled            总开关（false = 任何触发都直接退出）
+
 完整流程：
-1. 交易日判断（周一~周五；节假日 best-effort 用新浪交易日历，缓存 90 天）
+1. 交易日判断（check_trading_day=true 时；周一~周五 + 新浪交易日历，缓存 90 天）
 2. 分批调用 sepa_stage2_scanner.py（默认 200 只/批，单批 900s 超时，与 _scan_worker 约定一致）
 3. 合并去重结果写入本地 SQLite（sepa_stage2.db）—— 断网兜底 + 历史归档
 4. HTTP POST 上报主机 stock_server（/api/sepa/stage2/upload），失败重试 3 次
    主机收到后写入自己的 SQLite 并原子覆写 sepa_stage2_candidates_test.csv，
    dashboard 页面 / 下载 Excel 链路零改动。
 
-用法（cron 或 launchd 每交易日 18:00 触发，见 com.stock.sepa-stage2.plist）：
-    python3 sepa_stage2_job.py --server http://192.168.1.100:8001 --token XXX
-
 参数速查：
-    --force            非交易日强制运行
+    --force            手动试跑（忽略所有检查，不写"已执行"标记，不影响定时任务）
+    --boot-force       手动正式重跑（忽略检查，完成后更新标记）
     --total/--batch    扫描总数 / 每批数量（默认 5000 / 200）
-    --db               本地 SQLite 路径（默认 sepa_stage2.db）
     --no-upload        只落本地 SQLite，不上报（调试用）
     --reupload DATE    跳过扫描，从本地 SQLite 补传指定日期数据（网络恢复后用）
 """
@@ -30,9 +35,24 @@ import time
 import traceback
 from pathlib import Path
 
-import pandas as pd
+# pandas / sepa_db 延迟导入（_ensure_heavy_modules）：launchd 每 5 分钟轮询唤起时，
+# 未到时间 / 已执行 / 已停用等场景只做轻量判断即退出，不加载重量级依赖
+pd = None
+save_candidates = None
+load_candidates = None
 
-from sepa_db import save_candidates, load_candidates
+
+def _ensure_heavy_modules() -> None:
+    """首次真正需要扫描时才加载 pandas / sepa_db（轻量轮询的开销 < 0.1s）。"""
+    global pd, save_candidates, load_candidates
+    if pd is not None:
+        return
+    import pandas
+    pd = pandas
+    import sepa_db
+    save_candidates = sepa_db.save_candidates
+    load_candidates = sepa_db.load_candidates
+
 
 BATCH_TIMEOUT = 900          # 单批超时（秒），与 _scan_worker.py 约定一致
 UPLOAD_RETRIES = 3           # 上报失败重试次数
@@ -40,6 +60,8 @@ UPLOAD_RETRY_WAIT = 10       # 重试间隔（秒）
 CALENDAR_CACHE = Path(__file__).parent / "trade_calendar_cache.json"
 CALENDAR_TTL_DAYS = 90        # 交易日历缓存有效期
 MARKER_FILE = Path(__file__).parent / "last_run_marker.txt"   # 当天已执行标记
+LOCK_FILE = Path(__file__).parent / ".job.lock"               # 单实例锁（防并发扫描）
+BOOT_WINDOW_SECONDS = 600     # 开机后 10 分钟内的触发视为 RunAtLoad 开机触发
 
 
 def _ran_today() -> bool:
@@ -56,6 +78,33 @@ def _mark_ran_today() -> None:
         MARKER_FILE.write_text(str(dt.date.today()), encoding="utf-8")
     except Exception:
         pass
+
+
+def _uptime_seconds() -> float:
+    """系统已运行秒数（识别开机触发；获取失败返回 inf = 按轮询触发处理）。"""
+    try:
+        if sys.platform == "darwin":
+            import re
+            out = subprocess.check_output(["sysctl", "-n", "kern.boottime"], text=True, timeout=5)
+            m = re.search(r"sec\s*=\s*(\d+)", out)
+            if m:
+                return time.time() - int(m.group(1))
+        with open("/proc/uptime", encoding="ascii") as f:
+            return float(f.read().split()[0])
+    except Exception:
+        pass
+    return float("inf")
+
+
+def _run_time_today(cfg: dict):
+    """配置的今日执行时刻（datetime）；配置无效返回 None。"""
+    try:
+        h, m = map(int, str(cfg.get("run_time", "18:00")).split(":"))
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            return None
+        return dt.datetime.now().replace(hour=h, minute=m, second=0, microsecond=0)
+    except ValueError:
+        return None
 
 
 def is_trading_day(day: dt.date) -> bool:
@@ -226,9 +275,21 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    cfg = _load_agent_config()
+
+    # 单实例锁：launchd 轮询（每 5 分钟）、开机触发、手动运行可能同时发生，
+    # 防止并发扫描写坏文件
+    import fcntl
+    lock_fp = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("[job] 已有实例在运行，退出")
+        return 0
 
     # 补传模式：从本地 SQLite 读指定日期数据重新上报
     if args.reupload:
+        _ensure_heavy_modules()
         df = load_candidates(args.db, scan_date=args.reupload)
         if df.empty:
             print(f"[job] 本地无 {args.reupload} 的数据，退出")
@@ -240,16 +301,49 @@ def main() -> int:
         return 0 if ok else 1
 
     today = dt.date.today()
-    # 当天已成功执行过则跳过；--boot-force 运行时传参强制重跑（每次运行每次输入）
-    if not args.force and not args.boot_force and _ran_today():
-        print(f"[job] {today} 已执行过，跳过（--boot-force 可强制重跑）")
-        return 0
-    if args.boot_force and _ran_today():
-        print("[job] --boot-force 强制重跑：忽略当天已执行标记")
-    if not args.force and not is_trading_day(today):
-        print(f"[job] {today} 非交易日，跳过（--force 可强制运行）")
+
+    # ── 触发判断：全部由 agent_config.json 控制（改配置即生效，无需重装定时任务） ──
+    if not cfg.get("enabled", True):
+        print("[job] enabled=false，任务已停用")
         return 0
 
+    ran_today = _ran_today()
+    manual = args.force or args.boot_force
+
+    if manual:
+        # 手动运行（run_once.sh 自动带 --force / --boot-force）：想跑就跑
+        if ran_today:
+            kind = "--boot-force 正式重跑" if args.boot_force else "--force 试跑"
+            print(f"[job] {today} 已执行过，{kind}：忽略标记")
+    elif _uptime_seconds() < BOOT_WINDOW_SECONDS:
+        # 开机触发（launchd RunAtLoad / Linux @reboot 后的首次轮询）
+        if not cfg.get("boot_run", True):
+            print("[job] 开机触发，boot_run=false，跳过")
+            return 0
+        if ran_today and not cfg.get("boot_force", False):
+            print(f"[job] {today} 已执行过，开机触发跳过（boot_force=true 可强制）")
+            return 0
+        print("[job] 开机触发，开始执行" + ("（boot_force 强制）" if ran_today else ""))
+    else:
+        # 轮询触发（每 5 分钟）：到 run_time 且当天未执行才执行
+        if ran_today:
+            print(f"[job] {today} 已执行过，跳过")
+            return 0
+        scheduled = _run_time_today(cfg)
+        if scheduled is None:
+            print(f"WARN run_time 配置无效: {cfg.get('run_time')}（应为 HH:MM），跳过", file=sys.stderr)
+            return 1
+        if dt.datetime.now() < scheduled:
+            print(f"[job] 未到执行时间 {cfg.get('run_time')}，跳过")
+            return 0
+        print(f"[job] 已到执行时间 {cfg.get('run_time')}，开始执行")
+
+    # 交易日检查（--force 手动试跑绕过；配置 check_trading_day=false 关闭）
+    if not args.force and cfg.get("check_trading_day", True) and not is_trading_day(today):
+        print(f"[job] {today} 非交易日，跳过（check_trading_day=false 关闭检查 / --force 强制）")
+        return 0
+
+    _ensure_heavy_modules()
     scan_date = today.isoformat()
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[job] 开始 SEPA Stage2 扫描：{scan_date}，共 {args.total} 只，{args.batch} 只/批", flush=True)
@@ -265,8 +359,8 @@ def main() -> int:
     try:
         saved = save_candidates(df, args.db, scan_date)
         print(f"[job] 本地 SQLite 写入 {saved} 行 → {args.db}")
-        # 定时任务成功后标记当天已完成；--force 试跑不写标记（不影响 18:00 定时），
-        # --boot-force 是正式重跑，完成后更新标记（当天后续触发不再跑）
+        # 定时/开机触发成功后标记当天已完成；--force 手动试跑不写标记（不影响定时），
+        # --boot-force 手动正式重跑（及配置 boot_force 强制执行）完成后更新标记
         if not args.force or args.boot_force:
             _mark_ran_today()
     except Exception:

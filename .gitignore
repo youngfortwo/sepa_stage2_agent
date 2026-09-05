@@ -10,6 +10,8 @@ sepa_stage2.db
 sepa_stage2.db-wal
 sepa_stage2.db-shm
 agent_config.json
+last_run_marker.txt
+.job.lock
 rps_all.csv
 trade_calendar_cache.json
 sepa_stage2_candidates*.csv
