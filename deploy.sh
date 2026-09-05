@@ -42,7 +42,7 @@ done
 
 HOUR="${RUN_TIME%%:*}"; MINUTE="${RUN_TIME##*:}"
 if ! [[ "$RUN_TIME" =~ ^[0-9]{1,2}:[0-9]{1,2}$ ]]; then
-  warn "时间格式错误: $RUN_TIME（应为 HH:MM，如 17:30）"; exit 1
+  warn "时间格式错误: ${RUN_TIME}（应为 HH:MM，如 17:30）"; exit 1
 fi
 # 先转十进制再格式化（bash 3.2 的 printf/test 不认 "09" 这类前导零字符串）
 HOUR_N=$((10#$HOUR)); MINUTE_N=$((10#$MINUTE))
@@ -114,7 +114,7 @@ except Exception:
     sys.exit(1)
 PYEOF
 then ok "主机连通: $SERVER"
-else warn "主机不可达（$SERVER）。请确认主机 stock_server 已启动、IP 正确、同一局域网"
+else warn "主机不可达（${SERVER}）。请确认主机 stock_server 已启动、IP 正确、同一局域网"
 fi
 
 # ── 注册定时任务 ──
