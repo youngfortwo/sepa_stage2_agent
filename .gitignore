@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+*.err
+batch_results/
+scan_history/
+daily_cache/*.csv
+sepa_stage2.db
+sepa_stage2.db-wal
+sepa_stage2.db-shm
+agent_config.json
+rps_all.csv
+trade_calendar_cache.json
+sepa_stage2_candidates*.csv
+*.tar.gz
+# 财务缓存 111MB，超 GitHub 100MB 限制；首次运行自动重建
+financial_cache.json
