@@ -15,18 +15,31 @@ sepa_stage2_job.py                        ├─ 写 SQLite 历史归档
 
 ## 快速部署
 
+**一键部署**（装依赖 + 测连通 + 注册定时任务 + 设置定时唤醒，全自动化）：
+
 ```bash
-# 1. 装依赖（Python 3.9+）
-python3 -m pip install -r requirements.txt
-
-# 2. 一键部署（交互式：装依赖 + 测连通 + 注册定时任务）
 ./deploy.sh http://主机IP:8001
-
-# 3. 立即小批量试跑，验证全链路
-./run_once.sh --total 100
 ```
 
-macOS 用 deploy.sh 自动注册 launchd（周一~五 18:00）；Linux 用户按 deploy.sh 输出提示配置 crontab。
+自定义执行时间（默认每交易日 18:00）：
+
+```bash
+./deploy.sh http://主机IP:8001 --time 17:30
+```
+
+卸载（移除定时任务与定时唤醒，本地数据保留）：
+
+```bash
+./deploy.sh --uninstall
+```
+
+到点后 launchd **自动启动扫描程序**（无需登录、无需人工干预），扫描完成自动上报主机。macOS 额外设置 pmset 定时唤醒（提前 5 分钟），防止 Mac 睡眠错过触发；若脚本无 sudo 权限会打印手动执行命令。
+
+小批量试跑验证全链路：
+
+```bash
+./run_once.sh --total 100
+```
 
 ## 常用命令
 
