@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import subprocess
 import sys
 import time
@@ -52,6 +53,21 @@ def _ensure_heavy_modules() -> None:
     import sepa_db
     save_candidates = sepa_db.save_candidates
     load_candidates = sepa_db.load_candidates
+
+
+def _prevent_sleep_during_scan() -> None:
+    """扫描期间阻止 macOS 闲置睡眠：pmset 定时唤醒后无人操作，系统可能在
+    扫描中途（30-60 分钟）再次睡回去导致任务挂起、上报中断。
+    caffeinate -w 绑定本进程 PID，进程退出时 assertion 自动释放。"""
+    if sys.platform != "darwin":
+        return
+    try:
+        subprocess.Popen(
+            ["caffeinate", "-i", "-m", "-w", str(os.getpid())],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
 
 
 BATCH_TIMEOUT = 900          # 单批超时（秒），与 _scan_worker.py 约定一致
@@ -344,6 +360,7 @@ def main() -> int:
         return 0
 
     _ensure_heavy_modules()
+    _prevent_sleep_during_scan()  # 扫描全程阻止系统闲置睡眠（仅 macOS）
     scan_date = today.isoformat()
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[job] 开始 SEPA Stage2 扫描：{scan_date}，共 {args.total} 只，{args.batch} 只/批", flush=True)
