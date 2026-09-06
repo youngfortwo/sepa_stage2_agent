@@ -267,9 +267,15 @@ def build_payload(df: pd.DataFrame, scan_date: str, generated_at: str) -> dict:
 
 def _load_agent_config() -> dict:
     """读取同目录 agent_config.json（deploy.sh 生成）：改主机地址无需重装定时任务。"""
+    p = Path(__file__).parent / "agent_config.json"
     try:
-        return json.loads((Path(__file__).parent / "agent_config.json").read_text(encoding="utf-8"))
-    except Exception:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        # JSON 语法错误时警告（写入 launchd 的 err 日志），避免静默回退默认 run_time 造成困惑
+        print(f"WARN agent_config.json 解析失败（{e}），回退默认配置 run_time=18:00，"
+              f"请检查 JSON 语法: {p}", file=sys.stderr)
         return {}
 
 

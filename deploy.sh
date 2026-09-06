@@ -132,6 +132,17 @@ p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf
 print("[ok] agent_config.json:", json.dumps(cfg, ensure_ascii=False))
 PYEOF
 
+# ── 读回配置中的实际 run_time（日志显示/定时唤醒以用户配置为准，而非脚本默认值）──
+ACTUAL_RUN_TIME=$("$PY" -c "import json; print(json.load(open('agent_config.json')).get('run_time', ''))" 2>/dev/null || echo "")
+if [ -n "$ACTUAL_RUN_TIME" ] && [[ "$ACTUAL_RUN_TIME" =~ ^[0-9]{1,2}:[0-9]{1,2}$ ]]; then
+  RUN_TIME="$ACTUAL_RUN_TIME"
+  HOUR="${RUN_TIME%%:*}"; MINUTE="${RUN_TIME##*:}"
+  HOUR=$(printf '%02d' $((10#$HOUR))); MINUTE=$(printf '%02d' $((10#$MINUTE)))
+  ok "实际生效 run_time=${HOUR}:${MINUTE}（来自 agent_config.json，launchd 每次唤起时读取）"
+else
+  warn "agent_config.json 中 run_time 无效或缺失: '${ACTUAL_RUN_TIME}'，日志与唤醒时间使用脚本默认 ${HOUR}:${MINUTE}"
+fi
+
 # ── 连通性测试 ──
 if "$PY" - <<PYEOF
 import requests, sys
