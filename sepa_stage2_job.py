@@ -342,6 +342,13 @@ def main() -> int:
         if not cfg.get("boot_run", True):
             print("[job] 开机触发，boot_run=false，跳过")
             return 0
+        # 开机早于 run_time（如早晨开机）：当日行情尚未收盘，此刻扫描只会拿到
+        # 上一交易日的数据，还会写掉当天标记、挤掉 18:00 的正常定时扫描——
+        # 留给到点的轮询触发（机器已开机，StartCalendarInterval 会准时唤起）
+        _sched = _run_time_today(cfg)
+        if _sched is not None and dt.datetime.now() < _sched:
+            print(f"[job] 开机触发但未到执行时间 {cfg.get('run_time')}，等待定时轮询，跳过")
+            return 0
         if ran_today and not cfg.get("boot_force", False):
             print(f"[job] {today} 已执行过，开机触发跳过（boot_force=true 可强制）")
             return 0
