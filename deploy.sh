@@ -85,6 +85,35 @@ if [ -z "$SERVER" ]; then
   warn "缺少主机地址（默认 http://192.168.31.70:8001）"; exit 1
 fi
 
+# ── 停止正在运行的旧实例 ──
+# 场景：上次部署触发的首次扫描（--boot-force，全量约 30-60 分钟）或定时扫描
+# 还在跑时重新部署——结尾的首次扫描会因单实例锁直接退出、新代码不生效。
+# 连子进程一起清（job → scanner → _scan_worker），避免孤儿进程继续写批次文件。
+# 顺序：先 TERM 优雅停，2 秒后仍存活的 -9 强杀（TERM 后 flock 自动释放）。
+stop_old_processes() {
+  local pats=("sepa_stage2_job[.]py" "sepa_stage2_scanner[.]py" "_scan_worker[.]py" "sepa_query_server[.]py")
+  local stopped=0 p
+  for p in "${pats[@]}"; do
+    if pgrep -f "$p" >/dev/null 2>&1; then
+      pkill -f "$p" 2>/dev/null || true
+      stopped=1
+      ok "已发送停止信号: $p"
+    fi
+  done
+  if [ "$stopped" -eq 1 ]; then
+    sleep 2
+    # 兜底强杀（TERM 后仍未退出的），并清理 scanner 孤儿派生的 caffeinate 断言
+    # （caffeinate -w 绑定 job PID，job 退出即自动释放，无需单独处理）
+    for p in "${pats[@]}"; do
+      pkill -9 -f "$p" 2>/dev/null || true
+    done
+    ok "旧进程已清理"
+  else
+    info "无正在运行的旧进程"
+  fi
+}
+stop_old_processes
+
 # ── Python 检查 ──
 PY="${PYTHON:-python3}"
 if ! command -v "$PY" >/dev/null 2>&1; then
