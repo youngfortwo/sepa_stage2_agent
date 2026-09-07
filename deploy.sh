@@ -86,7 +86,7 @@ if [ -z "$SERVER" ]; then
 fi
 
 # ── 停止正在运行的旧实例 ──
-# 场景：上次部署触发的首次扫描（--boot-force，全量约 30-60 分钟）或定时扫描
+# 场景：正在运行的定时扫描（全量约 30-60 分钟）或手动 run_once.sh 触发的扫描
 # 还在跑时重新部署——结尾的首次扫描会因单实例锁直接退出、新代码不生效。
 # 连子进程一起清（job → scanner → _scan_worker），避免孤儿进程继续写批次文件。
 # 顺序：先 TERM 优雅停，2 秒后仍存活的 -9 强杀（TERM 后 flock 自动释放）。
@@ -273,16 +273,13 @@ else
   ok "查询服务已启动: http://本机IP:8010"
 fi
 
-# ── 部署完成立即正式执行一次（--boot-force：正式跑并写当天标记；enabled=false 时跳过） ──
-if "$PY" -c "import json,sys; sys.exit(0 if json.load(open('agent_config.json')).get('enabled', True) else 1)" 2>/dev/null; then
-  info "立即启动首次扫描（后台运行，日志 /tmp/sepa_stage2_job.log）…"
-  nohup "$PY" sepa_stage2_job.py --boot-force >> /tmp/sepa_stage2_job.log 2>&1 &
-else
-  info "enabled=false，跳过首次扫描"
-fi
-
+# ── 部署完成：不自动扫描，执行时机完全由 agent_config.json 控制 ──
+# （此前每次 deploy 都会 --boot-force 立即全量扫描一遍：反复部署时上一次扫描
+#   被中途杀掉、当天标记未写，18:00 后每个 5 分钟轮询都会重新拉起全量扫描。
+#   launchd 每 5 分钟唤起 job 自行判断，到 run_time 自然执行，部署无需触发）
 echo ""
 ok "部署完成！执行时机全部由 agent_config.json 控制（改配置即生效，无需重装）。"
-ok "当前配置：run_time=${HOUR}:${MINUTE}，详见 agent_config.json（run_time/boot_run/boot_force/check_trading_day/enabled）。"
-info "小批量试跑验证全链路（前 100 只）:"
-echo "    ./run_once.sh --total 100"
+ok "当前配置：run_time=${HOUR}:${MINUTE}，launchd 每 5 分钟唤起检查，到点自动执行。"
+info "需要立即手动验证时（不影响定时规则）:"
+echo "    ./run_once.sh --total 100     # 小批量试跑（不写当天标记）"
+echo "    ./run_once.sh --boot-force    # 全量正式重跑（完成后写当天标记）"
