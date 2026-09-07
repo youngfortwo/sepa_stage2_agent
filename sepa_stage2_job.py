@@ -36,6 +36,39 @@ import time
 import traceback
 from pathlib import Path
 
+
+class _TimeStampedWriter:
+    """stdout/stderr 包装：每行自动加时间前缀。
+
+    launchd 的 StandardOutPath 只记录进程原始输出、不带时间戳，导致
+    /tmp/sepa_stage2_job.log 里无法区分各次轮询唤起的日志。包装后
+    所有 print（含 traceback、file=sys.stderr 输出）均带时间前缀。
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._buf = ""
+
+    def write(self, text):
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._stream.write(
+                f"[{dt.datetime.now():%Y-%m-%d %H:%M:%S}] {line}\n"
+            )
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):  # isatty / encoding 等属性透传
+        return getattr(self._stream, name)
+
+
+if os.environ.get("_SEPA_JOB_TS") != "1":  # 防重复包装
+    os.environ["_SEPA_JOB_TS"] = "1"
+    sys.stdout = _TimeStampedWriter(sys.stdout)
+    sys.stderr = _TimeStampedWriter(sys.stderr)
+
 # pandas / sepa_db 延迟导入（_ensure_heavy_modules）：launchd 每 5 分钟轮询唤起时，
 # 未到时间 / 已执行 / 已停用等场景只做轻量判断即退出，不加载重量级依赖
 pd = None
@@ -347,7 +380,7 @@ def main() -> int:
         # 留给到点的轮询触发（机器已开机，StartCalendarInterval 会准时唤起）
         _sched = _run_time_today(cfg)
         if _sched is not None and dt.datetime.now() < _sched:
-            print(f"[job] 开机触发但未到执行时间 {cfg.get('run_time')}，等待定时轮询，跳过")
+            print(f"[job] 开机触发但未到执行时间 {_sched.strftime('%H:%M')}，等待定时轮询，跳过")
             return 0
         if ran_today and not cfg.get("boot_force", False):
             print(f"[job] {today} 已执行过，开机触发跳过（boot_force=true 可强制）")
@@ -362,10 +395,13 @@ def main() -> int:
         if scheduled is None:
             print(f"WARN run_time 配置无效: {cfg.get('run_time')}（应为 HH:MM），跳过", file=sys.stderr)
             return 1
+        # 打印实际生效时间（_run_time_today 内部对缺失配置回退默认 18:00，
+        # 直接打印 cfg.get('run_time') 会显示 None 造成误解）
+        eff_run_time = scheduled.strftime("%H:%M")
         if dt.datetime.now() < scheduled:
-            print(f"[job] 未到执行时间 {cfg.get('run_time')}，跳过")
+            print(f"[job] 未到执行时间 {eff_run_time}，跳过")
             return 0
-        print(f"[job] 已到执行时间 {cfg.get('run_time')}，开始执行")
+        print(f"[job] 已到执行时间 {eff_run_time}，开始执行")
 
     # 交易日检查（--force 手动试跑绕过；配置 check_trading_day=false 关闭）
     if not args.force and cfg.get("check_trading_day", True) and not is_trading_day(today):
