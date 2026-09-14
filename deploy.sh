@@ -65,6 +65,9 @@ if [ "$UNINSTALL" -eq 1 ]; then
     QPLIST="$HOME/Library/LaunchAgents/com.stock.sepa-stage2-query.plist"
     launchctl unload "$QPLIST" >/dev/null 2>&1 || true
     rm -f "$QPLIST"
+    OPLIST="$HOME/Library/LaunchAgents/com.stock.oversold.plist"
+    launchctl unload "$OPLIST" >/dev/null 2>&1 || true
+    rm -f "$OPLIST"
     ok "已移除 launchd 定时任务与查询服务"
     # 撤销定时唤醒（仅当设置了 pmset 且有 sudo 权限时）
     if sudo -n pmset -g repeat >/dev/null 2>&1; then
@@ -91,7 +94,7 @@ fi
 # 连子进程一起清（job → scanner → _scan_worker），避免孤儿进程继续写批次文件。
 # 顺序：先 TERM 优雅停，2 秒后仍存活的 -9 强杀（TERM 后 flock 自动释放）。
 stop_old_processes() {
-  local pats=("sepa_stage2_job[.]py" "sepa_stage2_scanner[.]py" "_scan_worker[.]py" "sepa_query_server[.]py")
+  local pats=("sepa_stage2_job[.]py" "oversold_job[.]py" "sepa_stage2_scanner[.]py" "oversold_rebound_scanner[.]py" "_scan_worker[.]py" "sepa_query_server[.]py")
   local stopped=0 p
   for p in "${pats[@]}"; do
     if pgrep -f "$p" >/dev/null 2>&1; then
@@ -218,6 +221,38 @@ EOF
   launchctl load "$PLIST"
   ok "定时任务已注册（launchd 哑触发器：开机 + 每 5 分钟唤起）"
   ok "  · 执行时间等全部由 agent_config.json 控制（当前 run_time=${HOUR}:${MINUTE}），改配置即生效"
+
+  # ── 超跌反弹定时任务（与 SEPA Stage2 共用 run_time，各自独立 job/表/上报接口）──
+  OPLIST="$HOME/Library/LaunchAgents/com.stock.oversold.plist"
+  cat > "$OPLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.stock.oversold</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$(command -v "$PY")</string>
+        <string>${AGENT_DIR}/oversold_job.py</string>
+    </array>
+    <key>WorkingDirectory</key><string>${AGENT_DIR}</string>
+    <key>RunAtLoad</key><true/>
+    <key>StartCalendarInterval</key>
+    <array>
+        $(for m in 0 5 10 15 20 25 30 35 40 45 50 55; do
+            echo "<dict><key>Minute</key><integer>$m</integer></dict>"
+          done | tr '\n' ' ')
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict><key>NO_PROXY</key><string>*</string><key>no_proxy</key><string>*</string></dict>
+    <key>StandardOutPath</key><string>/tmp/oversold_job.log</string>
+    <key>StandardErrorPath</key><string>/tmp/oversold_job.err</string>
+</dict>
+</plist>
+EOF
+  launchctl unload "$OPLIST" >/dev/null 2>&1 || true
+  launchctl load "$OPLIST"
+  ok "超跌反弹定时任务已注册（com.stock.oversold，共用 run_time=${HOUR}:${MINUTE}）"
 
   # ── 定时唤醒：防止睡眠/关机错过触发 ──
   # 唤醒时间 = 执行时间提前 5 分钟；每天唤醒（周几执行由 check_trading_day 配置决定）

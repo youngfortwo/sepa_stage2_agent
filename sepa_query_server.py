@@ -23,6 +23,8 @@ import pandas as pd
 from sepa_db import available_dates, load_candidates
 
 DB_PATH = "sepa_stage2.db"
+OVERSOLD_DB_PATH = "oversold.db"
+OVERSOLD_TABLE = "oversold_candidates"
 
 
 def _json_safe(v):
@@ -68,6 +70,23 @@ class QueryHandler(BaseHTTPRequestHandler):
                             "error": f"本地无数据：{date or '最新'}"}, status=404)
                 return
             scan_date = date or available_dates(DB_PATH)[-1]
+            df = df.drop(columns=["scan_date"], errors="ignore")
+            self._json(build_payload(df, scan_date))
+            return
+        if parsed.path == "/api/oversold/dates":
+            dates = available_dates(OVERSOLD_DB_PATH, table=OVERSOLD_TABLE)
+            self._json({"ok": True, "dates": dates,
+                        "latest": dates[-1] if dates else ""})
+            return
+        if parsed.path == "/api/oversold/data":
+            params = parse_qs(parsed.query)
+            date = (params.get("date", [""])[0] or "").strip()[:10]
+            df = load_candidates(OVERSOLD_DB_PATH, scan_date=date or None, table=OVERSOLD_TABLE)
+            if df is None or df.empty:
+                self._json({"ok": False,
+                            "error": f"本地无超跌反弹数据：{date or '最新'}"}, status=404)
+                return
+            scan_date = date or available_dates(OVERSOLD_DB_PATH, table=OVERSOLD_TABLE)[-1]
             df = df.drop(columns=["scan_date"], errors="ignore")
             self._json(build_payload(df, scan_date))
             return
